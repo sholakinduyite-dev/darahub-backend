@@ -1,0 +1,726 @@
+// Dara's Hub: database schema (PostgreSQL via Prisma)
+// Money is stored as whole kobo (integer). 1 naira = 100 kobo. Never use floats for money.
+// Order reference shown to people is "DH-" + number padded to 4 digits (built in code).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- enums ----------
+
+enum Role {
+  CUSTOMER
+  OWNER
+  MANAGER
+  PACKER
+  SUPPORT
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum CodePurpose {
+  SIGNUP
+  RESET_PASSWORD
+  GOOGLE_PHONE
+}
+
+enum CodeChannel {
+  EMAIL
+  SMS
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum PromoType {
+  PERCENT
+  FIXED
+}
+
+enum PaymentMethod {
+  PAYSTACK
+  POCKETFI
+  TRANSFER
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+// Main path: AWAITING_PAYMENT > (AWAITING_APPROVAL for transfers) > PAYMENT_CONFIRMED > PACKED > SHIPPED > DELIVERED
+// Exceptions: PAYMENT_FAILED, TRANSFER_REJECTED, CANCELLED, REFUNDED
+enum OrderStatus {
+  AWAITING_PAYMENT
+  AWAITING_APPROVAL
+  PAYMENT_CONFIRMED
+  PACKED
+  SHIPPED
+  DELIVERED
+  PAYMENT_FAILED
+  TRANSFER_REJECTED
+  CANCELLED
+  REFUNDED
+}
+
+enum ReceiptStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ActorType {
+  CUSTOMER
+  STAFF
+  SYSTEM
+}
+
+enum ReviewStatus {
+  VISIBLE
+  HIDDEN
+}
+
+enum RewardReason {
+  PURCHASE
+  REVIEW
+  PHOTO_REVIEW
+  REFERRAL
+  REDEEM
+  ADJUSTMENT
+}
+
+enum ReturnReason {
+  DAMAGED
+  WRONG_ITEM
+  MISSING
+  NO_FIT
+  OTHER
+}
+
+enum ReturnWants {
+  REFUND
+  EXCHANGE
+}
+
+enum ReturnStatus {
+  NEW
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  REFUNDED
+}
+
+enum NotificationType {
+  ORDER
+  PROMO
+  REWARD
+  REPLY
+  SUPPORT
+  ADMIN_ALERT
+}
+
+enum Platform {
+  ANDROID
+  IOS
+}
+
+enum BroadcastAudience {
+  EVERYONE
+  RECENT_BUYERS
+  REWARD_MEMBERS
+  ONE_CUSTOMER
+}
+
+enum BroadcastType {
+  PROMOTION
+  NEW_ARRIVAL
+  ANNOUNCEMENT
+}
+
+enum BroadcastStatus {
+  DRAFT
+  SCHEDULED
+  SENT
+}
+
+// ---------- accounts ----------
+
+model User {
+  id              String     @id @default(cuid())
+  email           String?    @unique
+  phone           String?    @unique
+  name            String
+  passwordHash    String? // empty for Google-only accounts
+  googleId        String?    @unique
+  avatarUrl       String?
+  role            Role       @default(CUSTOMER)
+  status          UserStatus @default(ACTIVE)
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  referralCode    String     @unique
+  referredById    String?
+  referredBy      User?      @relation("Referrals", fields: [referredById], references: [id])
+  referrals       User[]     @relation("Referrals")
+  pointsBalance   Int        @default(0)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  sessions         Session[]
+  codes            VerificationCode[]
+  addresses        Address[]
+  favorites        Favorite[]
+  cart             Cart?
+  orders           Order[]
+  orderEvents      OrderEvent[]
+  reviews          Review[]
+  comments         ReviewComment[]
+  reports          Report[]
+  rewardEntries    RewardEntry[]
+  giftCards        GiftCard[]
+  returnsMade      ReturnRequest[]  @relation("ReturnCustomer")
+  returnsDecided   ReturnRequest[]  @relation("ReturnDecider")
+  receiptsReviewed TransferReceipt[] @relation("ReceiptReviewer")
+  notifications    Notification[]
+  notificationPref NotificationPref?
+  deviceTokens     DeviceToken[]
+  broadcasts       Broadcast[]
+  waitlist         StockWaitlist[]
+  stockHolds       StockHold[]
+  activity         ActivityLog[]
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  device    String?
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// One-time codes for sign-up, password reset and Google phone check. Store only a hash of the code.
+model VerificationCode {
+  id         String      @id @default(cuid())
+  userId     String?
+  target     String // email address or phone number the code was sent to
+  channel    CodeChannel
+  purpose    CodePurpose
+  codeHash   String
+  attempts   Int         @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime    @default(now())
+  user       User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([target, purpose])
+}
+
+model DeliveryZone {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  fee       Int
+  etaDays   Int       @default(3)
+  active    Boolean   @default(true)
+  addresses Address[]
+  orders    Order[]
+}
+
+model Address {
+  id        String        @id @default(cuid())
+  userId    String
+  label     String        @default("Home")
+  recipient String
+  phone     String
+  line1     String
+  line2     String?
+  city      String
+  state     String
+  zoneId    String?
+  isDefault Boolean       @default(false)
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  zone      DeliveryZone? @relation(fields: [zoneId], references: [id])
+
+  @@index([userId])
+}
+
+// ---------- catalog ----------
+
+model Category {
+  id       String    @id @default(cuid())
+  name     String    @unique
+  slug     String    @unique
+  imageUrl String?
+  sort     Int       @default(0)
+  products Product[]
+}
+
+model Product {
+  id            String        @id @default(cuid())
+  name          String
+  slug          String        @unique
+  description   String        @default("")
+  categoryId    String
+  price         Int
+  salePrice     Int?
+  isFeatured    Boolean       @default(false)
+  isNewArrival  Boolean       @default(false)
+  status        ProductStatus @default(DRAFT)
+  ratingAvg     Float         @default(0)
+  ratingCount   Int           @default(0)
+  soldCount     Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  category      Category      @relation(fields: [categoryId], references: [id])
+  images        ProductImage[]
+  variants      Variant[]
+  favorites     Favorite[]
+  reviews       Review[]
+
+  @@index([categoryId, status])
+  @@index([status, createdAt])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  url       String
+  sort      Int     @default(0)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+// A sellable size/colour. "stock" is what is on the shelf; active holds are subtracted when showing availability.
+model Variant {
+  id         String          @id @default(cuid())
+  productId  String
+  size       String?
+  color      String?
+  sku        String          @unique
+  stock      Int             @default(0)
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+  holds      StockHold[]
+  waitlist   StockWaitlist[]
+
+  @@unique([productId, size, color])
+}
+
+// Items reserved while a customer checks out. Released when expiresAt passes or the order is paid or cancelled.
+model StockHold {
+  id         String    @id @default(cuid())
+  variantId  String
+  qty        Int
+  userId     String?
+  guestToken String?
+  orderId    String?
+  expiresAt  DateTime
+  releasedAt DateTime?
+  createdAt  DateTime  @default(now())
+  variant    Variant   @relation(fields: [variantId], references: [id])
+  user       User?     @relation(fields: [userId], references: [id])
+  order      Order?    @relation(fields: [orderId], references: [id])
+
+  @@index([variantId, expiresAt])
+}
+
+// "Notify me when back in stock"
+model StockWaitlist {
+  id         String    @id @default(cuid())
+  variantId  String
+  userId     String
+  notifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+  variant    Variant   @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, userId])
+}
+
+model Favorite {
+  id          String   @id @default(cuid())
+  userId      String
+  productId   String
+  priceAtSave Int // used to detect price drops
+  alertOn     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+}
+
+// ---------- cart, promo, orders ----------
+
+model PromoCode {
+  id         String    @id @default(cuid())
+  code       String    @unique
+  type       PromoType
+  value      Int // percent (1-100) or amount in kobo
+  minSpend   Int       @default(0)
+  startsAt   DateTime?
+  endsAt     DateTime?
+  usageLimit Int?
+  usedCount  Int       @default(0)
+  active     Boolean   @default(true)
+  carts      Cart[]
+  orders     Order[]
+}
+
+model Cart {
+  id          String     @id @default(cuid())
+  userId      String?    @unique
+  guestToken  String?    @unique
+  promoCodeId String?
+  updatedAt   DateTime   @updatedAt
+  user        User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
+  items       CartItem[]
+}
+
+model CartItem {
+  id        String  @id @default(cuid())
+  cartId    String
+  variantId String
+  qty       Int
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant   Variant @relation(fields: [variantId], references: [id])
+
+  @@unique([cartId, variantId])
+}
+
+model Order {
+  id                  String        @id @default(cuid())
+  number              Int           @unique @default(autoincrement())
+  userId              String? // empty for guest checkout
+  guestName           String?
+  guestEmail          String?
+  guestPhone          String?
+  status              OrderStatus   @default(AWAITING_PAYMENT)
+  subtotal            Int
+  deliveryFee         Int
+  discount            Int           @default(0)
+  pointsUsed          Int           @default(0)
+  total               Int
+  promoCodeId         String?
+  paymentMethod       PaymentMethod
+  zoneId              String?
+  addressSnapshot     Json // copy of the address at order time
+  riderName           String?
+  riderPhone          String?
+  estimatedDeliveryAt DateTime?
+  deliveredAt         DateTime?
+  receiptConfirmedAt  DateTime? // customer tapped "Yes, all good" (or auto-confirmed)
+  cancelledAt         DateTime?
+  cancelReason        String?
+  unpaidExpiresAt     DateTime? // unpaid orders are cancelled after this time
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  user                User?         @relation(fields: [userId], references: [id])
+  promoCode           PromoCode?    @relation(fields: [promoCodeId], references: [id])
+  zone                DeliveryZone? @relation(fields: [zoneId], references: [id])
+  items               OrderItem[]
+  events              OrderEvent[]
+  payments            Payment[]
+  receipts            TransferReceipt[]
+  returns             ReturnRequest[]
+  holds               StockHold[]
+  rewardEntries       RewardEntry[]
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}
+
+model OrderItem {
+  id          String          @id @default(cuid())
+  orderId     String
+  variantId   String
+  productName String // copied so old orders never change
+  size        String?
+  color       String?
+  imageUrl    String?
+  unitPrice   Int
+  qty         Int
+  order       Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant     Variant         @relation(fields: [variantId], references: [id])
+  reviews     Review[]
+  returns     ReturnRequest[]
+}
+
+// The order history shown in admin: who changed what and when. Append only.
+model OrderEvent {
+  id         String       @id @default(cuid())
+  orderId    String
+  type       String // e.g. "status_changed", "receipt_uploaded", "customer_notified"
+  fromStatus OrderStatus?
+  toStatus   OrderStatus?
+  actorType  ActorType
+  actorId    String?
+  note       String?
+  createdAt  DateTime     @default(now())
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  actor      User?        @relation(fields: [actorId], references: [id])
+
+  @@index([orderId, createdAt])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  orderId       String
+  provider      PaymentMethod
+  reference     String        @unique // our reference sent to the provider
+  amount        Int
+  status        PaymentStatus @default(PENDING)
+  failureReason String?
+  raw           Json? // provider webhook payload, kept for disputes
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+model TransferReceipt {
+  id              String        @id @default(cuid())
+  orderId         String
+  imageUrl        String
+  amountOnReceipt Int?
+  status          ReceiptStatus @default(PENDING)
+  rejectReason    String?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reviewer        User?         @relation("ReceiptReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status, createdAt])
+}
+
+// ---------- reviews ----------
+
+model Review {
+  id           String          @id @default(cuid())
+  productId    String
+  userId       String
+  orderItemId  String? // set when the buyer really bought it ("Verified buyer")
+  rating       Int
+  body         String          @default("")
+  status       ReviewStatus    @default(VISIBLE)
+  helpfulCount Int             @default(0)
+  editedAt     DateTime?
+  createdAt    DateTime        @default(now())
+  product      Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user         User            @relation(fields: [userId], references: [id])
+  orderItem    OrderItem?      @relation(fields: [orderItemId], references: [id])
+  images       ReviewImage[]
+  comments     ReviewComment[]
+  reports      Report[]
+
+  @@index([productId, status])
+}
+
+model ReviewImage {
+  id       String @id @default(cuid())
+  reviewId String
+  url      String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model ReviewComment {
+  id        String       @id @default(cuid())
+  reviewId  String
+  userId    String
+  body      String
+  status    ReviewStatus @default(VISIBLE)
+  createdAt DateTime     @default(now())
+  review    Review       @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id])
+  reports   Report[]
+}
+
+model Report {
+  id         String         @id @default(cuid())
+  reporterId String
+  reviewId   String?
+  commentId  String?
+  reason     String
+  resolvedAt DateTime?
+  createdAt  DateTime       @default(now())
+  reporter   User           @relation(fields: [reporterId], references: [id])
+  review     Review?        @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  comment    ReviewComment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+}
+
+// ---------- rewards, gift cards, returns ----------
+
+// Every points change is a row. User.pointsBalance is the running total of these rows.
+model RewardEntry {
+  id        String       @id @default(cuid())
+  userId    String
+  points    Int // positive earns, negative spends
+  reason    RewardReason
+  orderId   String?
+  note      String?
+  createdAt DateTime     @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order     Order?       @relation(fields: [orderId], references: [id])
+
+  @@index([userId, createdAt])
+}
+
+model GiftCard {
+  id               String    @id @default(cuid())
+  code             String    @unique
+  amount           Int
+  balance          Int
+  purchasedById    String?
+  recipientName    String?
+  recipientContact String?
+  expiresAt        DateTime?
+  createdAt        DateTime  @default(now())
+  purchasedBy      User?     @relation(fields: [purchasedById], references: [id])
+}
+
+model ReturnRequest {
+  id           String          @id @default(cuid())
+  orderId      String
+  orderItemId  String?
+  customerId   String
+  reason       ReturnReason
+  message      String          @default("")
+  wants        ReturnWants
+  status       ReturnStatus    @default(NEW)
+  decidedById  String?
+  decidedAt    DateTime?
+  rejectReason String?
+  refundAmount Int?
+  createdAt    DateTime        @default(now())
+  order        Order           @relation(fields: [orderId], references: [id])
+  orderItem    OrderItem?      @relation(fields: [orderItemId], references: [id])
+  customer     User            @relation("ReturnCustomer", fields: [customerId], references: [id])
+  decidedBy    User?           @relation("ReturnDecider", fields: [decidedById], references: [id])
+  images       ReturnImage[]
+
+  @@index([status, createdAt])
+}
+
+model ReturnImage {
+  id       String        @id @default(cuid())
+  returnId String
+  url      String
+  return   ReturnRequest @relation(fields: [returnId], references: [id], onDelete: Cascade)
+}
+
+// ---------- notifications ----------
+
+// The in-app inbox. A push message is also sent when the user's preferences allow it.
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  deepLink  String? // e.g. "order/DH-0001" so a tap opens the right screen
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+model NotificationPref {
+  id          String  @id @default(cuid())
+  userId      String  @unique
+  push        Boolean @default(true)
+  orders      Boolean @default(true)
+  promos      Boolean @default(true)
+  rewards     Boolean @default(true)
+  replies     Boolean @default(true)
+  support     Boolean @default(true)
+  quietStart  String? // "22:00", promos only
+  quietEnd    String? // "07:00"
+  adminAlerts Json? // staff only: which admin alerts they want
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DeviceToken {
+  id         String   @id @default(cuid())
+  userId     String
+  token      String   @unique // Firebase Cloud Messaging token
+  platform   Platform
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Broadcast {
+  id             String            @id @default(cuid())
+  createdById    String
+  audience       BroadcastAudience
+  targetUserId   String?
+  type           BroadcastType
+  title          String
+  message        String
+  link           String?
+  scheduledAt    DateTime?
+  sentAt         DateTime?
+  status         BroadcastStatus   @default(DRAFT)
+  deliveredCount Int               @default(0)
+  openedCount    Int               @default(0)
+  createdAt      DateTime          @default(now())
+  createdBy      User              @relation(fields: [createdById], references: [id])
+}
+
+// ---------- shop content and settings ----------
+
+model Banner {
+  id       String  @id @default(cuid())
+  title    String
+  imageUrl String?
+  link     String?
+  sort     Int     @default(0)
+  active   Boolean @default(true)
+}
+
+// Shop rules that were [placeholders] in the wireframes live here so the owner can change them in admin:
+// stock_hold_minutes, unpaid_order_hours, return_window_days, auto_confirm_days, low_stock_threshold,
+// transfer_overdue_hours, bank_name, bank_account_number, bank_account_name, points_per_naira, referral_bonus, etc.
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// General audit trail for staff actions (product edits, role changes, refunds).
+model ActivityLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  meta      Json?
+  createdAt DateTime @default(now())
+  actor     User?    @relation(fields: [actorId], references: [id])
+
+  @@index([entity, entityId])
+}

@@ -1,0 +1,34 @@
+# Optional: one-click setup on Render (render.com). Create a "Blueprint" from your GitHub repo.
+# The free plans are for testing only. Check Render's current terms and upgrade before real customers use the app.
+services:
+  - type: web
+    name: darahub-api
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run db:push && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: darahub-db
+          property: connectionString
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: GOOGLE_CLIENT_ID_ANDROID
+        sync: false
+      - key: GOOGLE_CLIENT_ID_IOS
+        sync: false
+      - key: GOOGLE_CLIENT_ID_WEB
+        sync: false
+      - key: MESSAGING_MODE
+        value: console
+databases:
+  - name: darahub-db
+    plan: free
+    databaseName: darahub
+    user: darahub
