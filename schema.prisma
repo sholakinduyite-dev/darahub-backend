@@ -175,6 +175,8 @@ model User {
   referredBy      User?      @relation("Referrals", fields: [referredById], references: [id])
   referrals       User[]     @relation("Referrals")
   pointsBalance   Int        @default(0)
+  failedLogins    Int        @default(0)
+  lockedUntil     DateTime?
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
@@ -219,7 +221,7 @@ model Session {
 model VerificationCode {
   id         String      @id @default(cuid())
   userId     String?
-  target     String // email address or phone number the code was sent to
+  target     String // the email or phone the person typed; the app sends it back to verify (the code may be delivered to their other contact)
   channel    CodeChannel
   purpose    CodePurpose
   codeHash   String
