@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { CodeChannel, CodePurpose } from '@prisma/client';
+import type { CodePurpose } from '@prisma/client';
 import { config } from '../config';
 import { prisma } from '../db';
 import { Errors } from '../errors';
@@ -7,13 +7,13 @@ import { getSetting } from '../services/settings';
 import { sendCode } from './messenger';
 import { hmac, safeEqual } from './tokens';
 
-// "identifier" is what the app uses to find the code again when verifying (the email or phone the person typed).
-// "deliverTo" is where the code is actually sent. They can differ, for example "send my signup code by SMS instead".
+// "identifier" is what the app uses to find the code again when verifying.
+// Verification delivery is email-only; "deliverTo" is the account email address.
 export async function createCode(opts: {
   userId: string;
   identifier: string;
   deliverTo: string;
-  channel: CodeChannel;
+  channel: 'EMAIL';
   purpose: CodePurpose;
 }) {
   const waitSeconds = await getSetting('resend_wait_seconds', 60);
