@@ -11,7 +11,7 @@ import { asyncHandler, parse, userId } from '../http';
 import { requireAuth } from '../middleware/auth';
 import { createCode, verifyCode } from '../lib/codes';
 import { isVerified, normalizePhone, publicUser, uniqueReferralCode } from '../lib/identity';
-import { maskEmail, maskPhone } from '../lib/messenger';
+import { maskEmail } from '../lib/messenger';
 import { hmac, issueSession, signPurposeToken, verifyPurposeToken } from '../lib/tokens';
 import { getSetting } from '../services/settings';
 
@@ -57,7 +57,7 @@ async function resolveReferral(codeInput?: string): Promise<string | undefined> 
 
 // Sends a code for an existing person. When the person does not exist (or does not need a code) it answers exactly the
 // same way without sending anything, so nobody can use this to find out who has an account.
-async function sendFor(identifier: string, purpose: CodePurpose, wanted?: CodeChannel) {
+async function sendFor(identifier: string, purpose: CodePurpose, _wanted?: CodeChannel) {
   const user = identifier.includes('@')
     ? await prisma.user.findUnique({ where: { email: identifier } })
     : await prisma.user.findUnique({ where: { phone: identifier } });
@@ -66,23 +66,23 @@ async function sendFor(identifier: string, purpose: CodePurpose, wanted?: CodeCh
     !!user &&
     (purpose === 'RESET_PASSWORD' || (purpose === 'SIGNUP' && !user.emailVerifiedAt && !user.phoneVerifiedAt) || (purpose === 'GOOGLE_PHONE' && !user.phoneVerifiedAt));
 
-  let channel: CodeChannel = purpose === 'GOOGLE_PHONE' ? 'SMS' : wanted ?? (identifier.includes('@') ? 'EMAIL' : 'SMS');
-  if (user && channel === 'SMS' && !user.phone) channel = 'EMAIL';
+  // SMS delivery is intentionally disabled. All verification and reset codes go to the account email.
+  const channel: CodeChannel = 'EMAIL';
 
   const base = { next: 'verify', purpose: purposeName(purpose), target: identifier, channel };
 
   if (!user || !eligible) {
     return {
       ...base,
-      sentTo: identifier.includes('@') ? maskEmail(identifier) : maskPhone(identifier),
+      sentTo: identifier.includes('@') ? maskEmail(identifier) : 'your account email',
       expiresInSeconds: (await getSetting('verification_code_minutes', 10)) * 60,
       resendInSeconds: await getSetting('resend_wait_seconds', 60),
     };
   }
 
-  const deliverTo = channel === 'SMS' ? (user.phone as string) : (user.email as string);
+  const deliverTo = user.email as string;
   const sent = await createCode({ userId: user.id, identifier, deliverTo, channel, purpose });
-  return { ...base, sentTo: channel === 'SMS' ? maskPhone(deliverTo) : maskEmail(deliverTo), ...sent };
+  return { ...base, sentTo: maskEmail(deliverTo), ...sent };
 }
 
 // ---------- sign up ----------
@@ -125,10 +125,10 @@ authRouter.post(
   '/resend-code',
   asyncHandler(async (req, res) => {
     const body = parse(
-      z.object({ identifier: z.string({ required_error: 'Enter your email or phone' }).trim().min(3, 'Enter your email or phone'), purpose: purposeEnum, channel: z.enum(['EMAIL', 'SMS']).optional() }),
+      z.object({ identifier: z.string({ required_error: 'Enter your email or phone' }).trim().min(3, 'Enter your email or phone'), purpose: purposeEnum }),
       req.body,
     );
-    res.json(await sendFor(normalizeIdentifier(body.identifier), PURPOSES[body.purpose], body.channel));
+    res.json(await sendFor(normalizeIdentifier(body.identifier), PURPOSES[body.purpose]));
   }),
 );
 
@@ -231,7 +231,8 @@ authRouter.post(
     if (user) {
       if (user.status === 'SUSPENDED') throw new AppError(403, 'FORBIDDEN', 'This account is suspended. Contact support.');
       if (user.phone && !user.phoneVerifiedAt) {
-        res.json({ status: 'needs_verification', ...(await sendFor(user.phone, 'GOOGLE_PHONE', 'SMS')) });
+        if (!user.email) throw Errors.notFound();
+        res.json({ status: 'needs_verification', ...(await sendFor(user.email, 'GOOGLE_PHONE')) });
         return;
       }
       if (user.phone) {
@@ -282,8 +283,8 @@ authRouter.post(
           },
         });
 
-    const sent = await createCode({ userId: user.id, identifier: body.phone, deliverTo: body.phone, channel: 'SMS', purpose: 'GOOGLE_PHONE' });
-    res.status(201).json({ next: 'verify', purpose: 'google_phone', target: body.phone, channel: 'SMS', sentTo: maskPhone(body.phone), ...sent });
+    const sent = await createCode({ userId: user.id, identifier: g.email, deliverTo: g.email, channel: 'EMAIL', purpose: 'GOOGLE_PHONE' });
+    res.status(201).json({ next: 'verify', purpose: 'google_phone', target: g.email, channel: 'EMAIL', sentTo: maskEmail(g.email), ...sent });
   }),
 );
 
@@ -309,10 +310,10 @@ authRouter.post(
   '/forgot-password',
   asyncHandler(async (req, res) => {
     const body = parse(
-      z.object({ identifier: z.string({ required_error: 'Enter your email or phone' }).trim().min(3, 'Enter your email or phone'), channel: z.enum(['EMAIL', 'SMS']).optional() }),
+      z.object({ identifier: z.string({ required_error: 'Enter your email or phone' }).trim().min(3, 'Enter your email or phone') }),
       req.body,
     );
-    res.json(await sendFor(normalizeIdentifier(body.identifier), 'RESET_PASSWORD', body.channel));
+    res.json(await sendFor(normalizeIdentifier(body.identifier), 'RESET_PASSWORD'));
   }),
 );
 
