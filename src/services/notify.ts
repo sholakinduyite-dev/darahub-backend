@@ -1,5 +1,6 @@
 import type { NotificationPref, NotificationType, Prisma } from '@prisma/client';
 import { prisma } from '../db';
+import { firebaseMessaging } from '../lib/firebase';
 
 const CATEGORY: Record<NotificationType, keyof NotificationPref | null> = {
   ORDER: 'orders',
@@ -55,10 +56,39 @@ export async function notifyUser(input: {
   return notification;
 }
 
-// Sends the phone notification. For now it only logs. Once your Firebase project is ready, replace the body
-// with firebase-admin's messaging().sendEachForMulticast(...) using the user's DeviceToken rows.
 async function pushToUser(userId: string, message: { title: string; body: string; deepLink?: string; notificationId: string }) {
   const tokens = await prisma.deviceToken.findMany({ where: { userId } });
   if (tokens.length === 0) return;
-  console.log(`[PUSH] to ${tokens.length} device(s) of user ${userId}: ${message.title}`);
+
+  const messaging = firebaseMessaging();
+  if (!messaging) {
+    console.warn('[PUSH] Firebase is not configured; notification kept in inbox only.');
+    return;
+  }
+
+  try {
+    const result = await messaging.sendEachForMulticast({
+      tokens: tokens.map((item) => item.token),
+      notification: { title: message.title, body: message.body },
+      data: {
+        notificationId: message.notificationId,
+        deepLink: message.deepLink ?? '',
+      },
+    });
+
+    const invalidTokens = result.responses
+      .map((response, index) => ({ response, token: tokens[index].token }))
+      .filter(({ response }) => !response.success)
+      .filter(({ response }) => {
+        const code = response.error?.code ?? '';
+        return code.includes('registration-token-not-registered') || code.includes('invalid-registration-token');
+      })
+      .map(({ token }) => token);
+
+    if (invalidTokens.length > 0) {
+      await prisma.deviceToken.deleteMany({ where: { token: { in: invalidTokens } } });
+    }
+  } catch (error) {
+    console.error('[PUSH] Firebase delivery failed:', error instanceof Error ? error.message : error);
+  }
 }
